@@ -30,6 +30,7 @@ in this Software without prior written authorization from The Open Group.
 #include <X11/Xlibint.h>
 #include <X11/Xutil.h>
 #include <stdio.h>
+#include <string.h>
 #include "ImUtil.h"
 
 static int _XDestroyImage(XImage *);
@@ -45,6 +46,10 @@ static int _XPutPixel16(XImage *, int, int, unsigned long);
 static int _XPutPixel32(XImage *, int, int, unsigned long);
 static XImage *_XSubImage(XImage *, int, int, unsigned int, unsigned int);
 static int _XAddPixel(XImage *, long);
+
+// Optimisations
+static void _XCopyRow(XImage*, XImage*, int, int, int, int, int);
+static void _XCopyRow32(XImage*, XImage*, int, int, int, int, int);
 
 static unsigned char const _lomask[0x09] = { 0x00, 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
 static unsigned char const _himask[0x09] = { 0xff, 0xfe, 0xfc, 0xf8, 0xf0, 0xe0, 0xc0, 0x80, 0x00 };
@@ -818,6 +823,55 @@ static int _XPutPixel1 (
 	}
 }
 
+static void _XCopyRow32(
+    XImage *src_ximage,
+    XImage *dst_ximage,
+    int src_x,
+    int src_y,
+    int dst_x,
+    int dst_y,
+    int width)
+{
+  unsigned char *src_addr;
+  unsigned char *dst_addr;
+
+  src_addr = &((unsigned char *)src_ximage->data)
+      [src_y * src_ximage->bytes_per_line + (src_x << 2)];
+  dst_addr = &((unsigned char *)dst_ximage->data)
+      [dst_y * dst_ximage->bytes_per_line + (dst_x << 2)];
+  memcpy(dst_addr, src_addr, width * 4);
+}
+
+
+static void _XCopyRow(
+    XImage *src_ximage,
+    XImage *dst_ximage,
+    int src_x,
+    int src_y,
+    int dst_x,
+    int dst_y,
+    int width)
+{
+  int col;
+  unsigned long pixel;
+
+  if (src_ximage->format == ZPixmap &&
+      dst_ximage->format == ZPixmap) {
+    if (src_ximage->bits_per_pixel == 32 &&
+        dst_ximage->bits_per_pixel == 32 &&
+        src_ximage->byte_order == dst_ximage->byte_order &&
+        src_ximage->depth == dst_ximage->depth) {
+      _XCopyRow32(src_ximage, dst_ximage, src_x, src_y, dst_x, dst_y, width);
+      return;
+    }
+  }
+
+  for (col = 0; col < width; col++) {
+    pixel = XGetPixel(src_ximage, src_x + col, src_y);
+    XPutPixel(dst_ximage, dst_x + col, dst_y, pixel);
+  }
+}
+
 /*
  * SubImage
  *
@@ -922,8 +976,7 @@ int _XSetImage(
     register int x,
     register int y)
 {
-	register unsigned long pixel;
-	register int row, col;
+	register int row;
 	int width, height, startrow, startcol;
 	if (x < 0) {
 	    startcol = -x;
@@ -944,10 +997,7 @@ int _XSetImage(
 
 	/* this is slow, will do better later */
 	for (row = startrow; row < height; row++) {
-	    for (col = startcol; col < width; col++) {
-		pixel = XGetPixel(srcimg, col, row);
-		XPutPixel(dstimg, x + col, y + row, pixel);
-	    }
+    _XCopyRow(srcimg, dstimg, startcol, row, x + startcol, y + row, width);
 	}
 	return 1;
 }
